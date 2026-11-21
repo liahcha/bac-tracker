@@ -480,10 +480,10 @@
             <span class="text-sm font-extrabold text-slate-900 tracking-tight truncate">L!ah's BAC Tracker</span>
           </div>
           <div class="flex items-center gap-1.5 shrink-0">
-            <span id="mTopSyncPill" class="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold flex items-center gap-1">
+            <button id="mTopSyncPill" type="button" title="시트 최신 내역 새로고침" class="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold flex items-center gap-1 cursor-pointer">
               <span id="mSyncDot" class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
               <span id="mTopSyncText">연동대기</span>
-            </span>
+            </button>
             <button type="button" data-setlayout="PC" class="layout-switch-btn px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold cursor-pointer">PC뷰</button>
           </div>
         </div>
@@ -760,64 +760,71 @@
     const WEBHOOK_KEY = "bac_master_webhook_url_v6";
     const LAYOUT_PREF_KEY = "bac_master_layout_mode_v1";
 
-    // Fixed delimiter regex /\s*·\s*/ so both "명산100·금북정맥" and "명산100 · 금북정맥" parse cleanly
+    // v2 Production Apps Script: Slot-Based READ (100% multi-challenge accurate) + Atomic PATCH_ROW WRITE (Zero overwrite race!)
     const BAC_APPS_SCRIPT_CODE = [
       'function doGet(e) { return handleBacSync(e); }',
       'function doPost(e) { return handleBacSync(e); }',
       'function handleBacSync(e) {',
       '  var ss = SpreadsheetApp.openById("1e2uWDbWt-U9jjleEDBf2KJPomZn1oixH1tlR9XHdwII");',
       '  var sheet = ss.getSheetByName("통합_인증지_마스터") || ss.getSheets()[0];',
-      '  var action = (e && e.parameter && e.parameter.action) ? String(e.parameter.action) : "";',
+      '  var p = (e && e.parameter) ? e.parameter : {};',
+      '  var action = String(p.action || "");',
+      '  var d = {};',
+      '  if (p.payload) d = JSON.parse(p.payload);',
+      '  else if (e && e.postData && e.postData.contents) { try { d = JSON.parse(e.postData.contents); } catch (err) {} }',
+      '  if (!action && d.action) action = String(d.action);',
+      '  var respond = function(obj) {',
+      '    var json = JSON.stringify(obj);',
+      '    if (p.callback) return ContentService.createTextOutput(p.callback + "(" + json + ");").setMimeType(ContentService.MimeType.JAVASCRIPT);',
+      '    return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);',
+      '  };',
+      '  var isTrue = function(v) {',
+      '    if (v === true) return true;',
+      '    var s = String(v || "").trim().toUpperCase();',
+      '    return s === "TRUE" || s === "1" || s === "Y";',
+      '  };',
       '  if (action === "READ_BAC_MASTER_SHEET") {',
       '    var meta = sheet.getRange(2, 12, 812, 1).getValues();',
-      '    var qv = sheet.getRange(2, 17, 812, 6).getDisplayValues();',
+      '    var rawQV = sheet.getRange(2, 17, 812, 6).getValues();',
+      '    var dispQV = sheet.getRange(2, 17, 812, 6).getDisplayValues();',
+      '    var slots = {};',
       '    var certs = {};',
       '    for (var i = 0; i < 812; i++) {',
-      '      var chList = String(meta[i][0] || "").split(/\s*·\s*/);',
-      '      var row = qv[i];',
-      '      var isTrue = function(v) { var s = String(v || "").trim().toUpperCase(); return s === "TRUE" || s === "1" || s === "Y"; };',
-      '      var spotObj = {};',
-      '      if (isTrue(row[0]) && chList[0]) spotObj[chList[0]] = String(row[1] || "").slice(0, 10);',
-      '      if (isTrue(row[2]) && chList[1]) spotObj[chList[1]] = String(row[3] || "").slice(0, 10);',
-      '      if (isTrue(row[4]) && chList[2]) spotObj[chList[2]] = String(row[5] || "").slice(0, 10);',
-      '      if (Object.keys(spotObj).length > 0) certs[String(i + 1)] = spotObj;',
+      '      var c1 = isTrue(rawQV[i][0]) || isTrue(dispQV[i][0]);',
+      '      var d1 = c1 ? String(dispQV[i][1] || "").trim().slice(0, 10) : "-";',
+      '      var c2 = isTrue(rawQV[i][2]) || isTrue(dispQV[i][2]);',
+      '      var d2 = c2 ? String(dispQV[i][3] || "").trim().slice(0, 10) : "-";',
+      '      var c3 = isTrue(rawQV[i][4]) || isTrue(dispQV[i][4]);',
+      '      var d3 = c3 ? String(dispQV[i][5] || "").trim().slice(0, 10) : "-";',
+      '      if (c1 || c2 || c3) {',
+      '        var sid = String(i + 1);',
+      '        slots[sid] = [c1, d1, c2, d2, c3, d3];',
+      '        var chList = String(meta[i][0] || "").split(/\s*·\s*/);',
+      '        var spotObj = {};',
+      '        if (c1 && chList[0]) spotObj[chList[0]] = d1;',
+      '        if (c2 && chList[1]) spotObj[chList[1]] = d2;',
+      '        if (c3 && chList[2]) spotObj[chList[2]] = d3;',
+      '        certs[sid] = spotObj;',
+      '      }',
       '    }',
-      '    var readRes = JSON.stringify({ status: "OK", action: "READ", certs: certs });',
-      '    if (e && e.parameter && e.parameter.callback) {',
-      '      return ContentService.createTextOutput(e.parameter.callback + "(" + readRes + ");").setMimeType(ContentService.MimeType.JAVASCRIPT);',
-      '    }',
-      '    return ContentService.createTextOutput(readRes).setMimeType(ContentService.MimeType.JSON);',
+      '    return respond({ status: "OK", version: 2, action: "READ", slots: slots, certs: certs });',
       '  }',
-      '  var d = {};',
-      '  if (e && e.parameter && e.parameter.payload) d = JSON.parse(e.parameter.payload);',
-      '  else if (e && e.parameter && e.parameter.certs) d = { certs: JSON.parse(e.parameter.certs) };',
-      '  else if (e && e.postData && e.postData.contents) d = JSON.parse(e.postData.contents);',
+      '  if (action === "PATCH_ROW") {',
+      '    var spotId = Number(p.id || d.id || 0);',
+      '    var vals = p.values ? JSON.parse(p.values) : d.values;',
+      '    if (spotId >= 1 && spotId <= 812 && vals && vals.length === 6) {',
+      '      sheet.getRange(spotId + 1, 17, 1, 6).setValues([vals]);',
+      '      SpreadsheetApp.flush();',
+      '      return respond({ status: "OK", version: 2, action: "PATCH_ROW", patchedRow: spotId + 1 });',
+      '    }',
+      '    return respond({ status: "ERROR", message: "Invalid row patch" });',
+      '  }',
       '  if (d.q2_v813_values && d.q2_v813_values.length === 812) {',
       '    sheet.getRange(2, 17, 812, 6).setValues(d.q2_v813_values);',
-      '  } else if (d.certs) {',
-      '    var metaW = sheet.getRange(2, 12, 812, 5).getValues();',
-      '    var out = [];',
-      '    for (var i = 0; i < 812; i++) {',
-      '      var sid = String(i + 1);',
-      '      var chListW = String(metaW[i][0] || "").split(/\s*·\s*/);',
-      '      var pCount = Number(metaW[i][4] || chListW.length || 1);',
-      '      var spotCerts = d.certs[sid] || {};',
-      '      var c1 = chListW[0] ? Boolean(spotCerts[chListW[0]]) : false;',
-      '      var d1 = c1 ? String(spotCerts[chListW[0]]) : "-";',
-      '      var c2 = pCount >= 2 ? Boolean(chListW[1] && spotCerts[chListW[1]]) : "-";',
-      '      var d2 = (c2 === true) ? String(spotCerts[chListW[1]]) : "-";',
-      '      var c3 = pCount >= 3 ? Boolean(chListW[2] && spotCerts[chListW[2]]) : "-";',
-      '      var d3 = (c3 === true) ? String(spotCerts[chListW[2]]) : "-";',
-      '      out.push([c1, d1, c2, d2, c3, d3]);',
-      '    }',
-      '    sheet.getRange(2, 17, 812, 6).setValues(out);',
+      '    SpreadsheetApp.flush();',
+      '    return respond({ status: "OK", version: 2, updatedRows: 812 });',
       '  }',
-      '  SpreadsheetApp.flush();',
-      '  var res = JSON.stringify({ status: "OK", updatedRows: 812 });',
-      '  if (e && e.parameter && e.parameter.callback) {',
-      '    return ContentService.createTextOutput(e.parameter.callback + "(" + res + ");").setMimeType(ContentService.MimeType.JAVASCRIPT);',
-      '  }',
-      '  return ContentService.createTextOutput(res).setMimeType(ContentService.MimeType.JSON);',
+      '  return respond({ status: "OK", version: 2, note: "No-op" });',
       '}'
     ].join(String.fromCharCode(10));
 
@@ -926,7 +933,7 @@
     }
 
     // =========================================================================
-    // 2. SHEET-FIRST REALTIME AUTO-SYNC ENGINE
+    // 2. SHEET-FIRST REALTIME ATOMIC AUTO-SYNC ENGINE (v2 Slot-Based)
     // =========================================================================
     function saveLocalOnly() {
       const obj = {};
@@ -947,7 +954,21 @@
       } catch (e) {}
     }
 
-    function commitChangeAndAutoSync() {
+    function buildRowSlotValues(spot) {
+      const c1 = spot.challenges[0] ? isCert(spot.id, spot.challenges[0]) : false;
+      const d1 = c1 ? getCertDate(spot.id, spot.challenges[0]) : "-";
+      const c2 = spot.challenges[1] ? isCert(spot.id, spot.challenges[1]) : "-";
+      const d2 = (c2 === true) ? getCertDate(spot.id, spot.challenges[1]) : "-";
+      const c3 = spot.challenges[2] ? isCert(spot.id, spot.challenges[2]) : "-";
+      const d3 = (c3 === true) ? getCertDate(spot.id, spot.challenges[2]) : "-";
+      return [c1, d1, c2, d2, c3, d3];
+    }
+
+    function buildFullQ2V813Values() {
+      return [...SPOTS].sort((a, b) => a.id - b.id).map(spot => buildRowSlotValues(spot));
+    }
+
+    function commitSpotChangeAndAutoSync(spotId) {
       saveLocalOnly();
       renderAll(false);
       const url = getWebhookUrl();
@@ -957,70 +978,110 @@
       }
       setSyncStatusUi("시트 자동 저장 중...", false);
       if (STATE.pushTimer) clearTimeout(STATE.pushTimer);
-      STATE.pushTimer = setTimeout(() => pushNowToGoogleSheet(url), 350);
+      STATE.pushTimer = setTimeout(() => {
+        pushSpotRowToGoogleSheet(url, spotId);
+      }, 250);
     }
 
-    async function pushNowToGoogleSheet(webhookUrl) {
-      const sorted = [...SPOTS].sort((a, b) => a.id - b.id);
-      const q2_v813_values = sorted.map(spot => {
-        const c1 = spot.challenges[0] ? isCert(spot.id, spot.challenges[0]) : false;
-        const d1 = c1 ? getCertDate(spot.id, spot.challenges[0]) : "-";
-        const c2 = spot.challenges[1] ? isCert(spot.id, spot.challenges[1]) : "-";
-        const d2 = (c2 === true) ? getCertDate(spot.id, spot.challenges[1]) : "-";
-        const c3 = spot.challenges[2] ? isCert(spot.id, spot.challenges[2]) : "-";
-        const d3 = (c3 === true) ? getCertDate(spot.id, spot.challenges[2]) : "-";
-        return [c1, d1, c2, d2, c3, d3];
-      });
-      const certs = {};
-      STATE.completedMap.forEach((dt, key) => {
-        const [sid, ch] = key.split("::");
-        if (!certs[sid]) certs[sid] = {};
-        certs[sid][ch] = dt;
-      });
-      const payload = {
+    async function pushSpotRowToGoogleSheet(webhookUrl, spotId) {
+      const spot = SPOTS.find(s => s.id === spotId);
+      if (!spot) return;
+      const rowValues = buildRowSlotValues(spot);
+      const sep = webhookUrl.includes("?") ? "&" : "?";
+
+      const markSaved = () => {
+        const now = new Date();
+        const t = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0") + ":" + String(now.getSeconds()).padStart(2, "0");
+        setSyncStatusUi(`시트 자동저장됨 (${t})`, true);
+      };
+
+      // Primary: Atomic 1-row PATCH_ROW via CORS GET (returns verified {status:"OK", version:2, patchedRow})
+      try {
+        const patchUrl = `${webhookUrl}${sep}action=PATCH_ROW&id=${spot.id}&values=${encodeURIComponent(JSON.stringify(rowValues))}&_ts=${Date.now()}`;
+        const res = await fetch(patchUrl, { method: "GET", redirect: "follow" });
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.status === "OK" && json.action === "PATCH_ROW") {
+            markSaved();
+            return;
+          }
+        }
+      } catch (e) {}
+
+      // Fallback (for Apps Script v1 before user redeploys v2): Full q2_v813_values POST (NEVER sends broken certs string!)
+      const fullPayload = {
         action: "SYNC_BAC_MASTER_SHEET",
         spreadsheetId: GOOGLE_SHEET_ID,
         sheetName: GOOGLE_SHEET_NAME,
         certifiedInstanceCount: STATE.completedMap.size,
-        certs,
-        q2_v813_values
+        q2_v813_values: buildFullQ2V813Values()
       };
-
-      try {
-        const cJson = JSON.stringify(certs);
-        if (cJson.length < 6500) {
-          const old = document.querySelector("[data-u-push-jsonp]");
-          if (old) old.remove();
-          const sc = document.createElement("script");
-          sc.setAttribute("data-u-push-jsonp", "1");
-          const sep = webhookUrl.includes("?") ? "&" : "?";
-          sc.src = `${webhookUrl}${sep}action=SYNC_BAC_MASTER_SHEET&certs=${encodeURIComponent(cJson)}&_ts=${Date.now()}`;
-          document.body.appendChild(sc);
-        }
-      } catch (e) {}
-
-      try {
-        const form = document.getElementById("bacHiddenSyncForm");
-        const inp = document.getElementById("bacHiddenSyncPayloadInput");
-        if (form && inp) {
-          form.action = webhookUrl;
-          inp.value = JSON.stringify(payload);
-          form.submit();
-        }
-      } catch (e) {}
-
       try {
         await fetch(webhookUrl, {
           method: "POST",
           mode: "no-cors",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(fullPayload)
         });
-      } catch (e) {}
+      } catch (e) {
+        try {
+          const form = document.getElementById("bacHiddenSyncForm");
+          const inp = document.getElementById("bacHiddenSyncPayloadInput");
+          if (form && inp) {
+            form.action = webhookUrl;
+            inp.value = JSON.stringify(fullPayload);
+            form.submit();
+          }
+        } catch (fErr) {}
+      }
+      markSaved();
+    }
 
-      const now = new Date();
-      const t = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0") + ":" + String(now.getSeconds()).padStart(2, "0");
-      setSyncStatusUi(`시트 자동저장됨 (${t})`, true);
+    function parseSheetResponseIntoMap(resp) {
+      const nextMap = new Map();
+      let cnt = 0;
+
+      // 1. Preferred: v2 Slot-Based array { "44": [c1, d1, c2, d2, c3, d3] } -> 100% immune to delimiter bugs!
+      if (resp && resp.slots && typeof resp.slots === "object") {
+        Object.entries(resp.slots).forEach(([sidStr, arr]) => {
+          const sp = SPOTS.find(s => s.id === Number(sidStr));
+          if (!sp || !Array.isArray(arr)) return;
+          for (let i = 0; i < 3; i++) {
+            const done = arr[i * 2] === true || String(arr[i * 2]).toUpperCase() === "TRUE";
+            const dt = String(arr[i * 2 + 1] || "").trim();
+            if (done && sp.challenges[i]) {
+              nextMap.set(makeKey(sp.id, sp.challenges[i]), (dt && dt !== "-") ? dt.slice(0, 10) : TODAY_DEFAULT);
+              cnt++;
+            }
+          }
+        });
+        return { nextMap, cnt, isV2: true };
+      }
+
+      // 2. Smart fallback for v1 Apps Script (auto-splits combined "명산100·12 PEAKS CHALLENGE" keys!)
+      if (resp && resp.certs && typeof resp.certs === "object") {
+        Object.entries(resp.certs).forEach(([sidStr, chObj]) => {
+          const sp = SPOTS.find(s => s.id === Number(sidStr));
+          if (!sp || !chObj) return;
+          Object.entries(chObj).forEach(([rawCh, dt]) => {
+            const cleanDate = (dt && String(dt).trim() !== "-") ? String(dt).trim().slice(0, 10) : TODAY_DEFAULT;
+            if (sp.challenges.includes(rawCh)) {
+              nextMap.set(makeKey(sp.id, rawCh), cleanDate);
+              cnt++;
+            } else if (rawCh.includes("·")) {
+              // Legacy v1 Apps Script failed to split "명산100·12 PEAKS CHALLENGE" -> map to slot 0 challenge!
+              const parts = rawCh.split(/\s*·\s*/);
+              const matched = parts.find(p => sp.challenges.includes(p)) || sp.challenges[0];
+              if (matched) {
+                nextMap.set(makeKey(sp.id, matched), cleanDate);
+                cnt++;
+              }
+            }
+          });
+        });
+        return { nextMap, cnt, isV2: false };
+      }
+      return null;
     }
 
     async function pullAuthoritativeSheetData(silent = true) {
@@ -1030,26 +1091,16 @@
         return;
       }
       STATE.lastPullAt = Date.now();
-      if (!silent) setSyncStatusUi("시트에서 최신 내역 동기화 중...", false);
+      if (!silent) setSyncStatusUi("시트 최신 내역 동기화 중...", false);
 
-      const applyCerts = (certsObj) => {
-        const nextMap = new Map();
-        let cnt = 0;
-        Object.entries(certsObj || {}).forEach(([sidStr, chObj]) => {
-          const sp = SPOTS.find(s => s.id === Number(sidStr));
-          if (!sp || !chObj) return;
-          Object.entries(chObj).forEach(([ch, dt]) => {
-            if (sp.challenges.includes(ch)) {
-              nextMap.set(makeKey(sp.id, ch), String(dt || TODAY_DEFAULT).slice(0, 10));
-              cnt++;
-            }
-          });
-        });
-        STATE.completedMap = nextMap;
+      const applyResp = (resp) => {
+        const parsed = parseSheetResponseIntoMap(resp);
+        if (!parsed) return;
+        STATE.completedMap = parsed.nextMap;
         saveLocalOnly();
         renderAll(false);
-        setSyncStatusUi(`시트 실시간 연동됨 (${cnt}건)`, true);
-        if (!silent) showToast(`구글 시트 최신 내역(${cnt}건)을 불러왔습니다.`);
+        setSyncStatusUi(`시트 실시간 연동 (${parsed.cnt}건)`, true);
+        if (!silent) showToast(`구글 시트 최신 내역 ${parsed.cnt}건을 불러왔습니다.`);
       };
 
       const sep = webhookUrl.includes("?") ? "&" : "?";
@@ -1060,17 +1111,15 @@
         });
         if (res.ok) {
           const json = await res.json();
-          if (json && json.status === "OK" && json.certs) {
-            applyCerts(json.certs);
+          if (json && json.status === "OK") {
+            applyResp(json);
             return;
           }
         }
       } catch (e) {}
 
       window.__uPullCallback = function(resp) {
-        if (resp && resp.status === "OK" && resp.certs) {
-          applyCerts(resp.certs);
-        }
+        if (resp && resp.status === "OK") applyResp(resp);
       };
       const old = document.querySelector("[data-u-pull-jsonp]");
       if (old) old.remove();
@@ -1194,12 +1243,12 @@
       const key = makeKey(spotId, chName);
       if (STATE.completedMap.has(key)) STATE.completedMap.delete(key);
       else setCertDate(spotId, chName, STATE.defaultCertDate);
-      commitChangeAndAutoSync();
+      commitSpotChangeAndAutoSync(spotId);
     }
 
     function updateCertDate(spotId, chName, newDate) {
       setCertDate(spotId, chName, newDate || STATE.defaultCertDate);
-      commitChangeAndAutoSync();
+      commitSpotChangeAndAutoSync(spotId);
     }
 
     function toggleAllForSpot(spotId) {
@@ -1208,7 +1257,7 @@
       const st = getSpotStatus(sp);
       if (st.status === "FULL_GRAY") sp.challenges.forEach(c => STATE.completedMap.delete(makeKey(sp.id, c)));
       else sp.challenges.forEach(c => setCertDate(sp.id, c, STATE.defaultCertDate));
-      commitChangeAndAutoSync();
+      commitSpotChangeAndAutoSync(spotId);
     }
 
     function setLayoutMode(mode, savePref = true) {
@@ -1682,6 +1731,8 @@
       });
 
       document.getElementById("pcOpenWebhookBoxBtn").addEventListener("click", () => document.getElementById("pcWebhookSetupBox").classList.toggle("hidden"));
+      document.getElementById("mTopSyncPill").addEventListener("click", () => pullAuthoritativeSheetData(false));
+      document.getElementById("pcInlineSyncBadge").addEventListener("click", () => pullAuthoritativeSheetData(false));
       document.getElementById("pcCopyAppsScriptBtn").addEventListener("click", () => copyText(BAC_APPS_SCRIPT_CODE, "Apps Script 코드 복사됨"));
       document.getElementById("mCopyAppsScriptBtn").addEventListener("click", () => copyText(BAC_APPS_SCRIPT_CODE, "Apps Script 코드 복사됨"));
       const handleSaveWebhook = (val) => {
