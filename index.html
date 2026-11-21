@@ -989,52 +989,68 @@
       const rowValues = buildRowSlotValues(spot);
       const sep = webhookUrl.includes("?") ? "&" : "?";
 
-      const markSaved = () => {
+      const markSaved = (viaLabel = "") => {
         const now = new Date();
         const t = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0") + ":" + String(now.getSeconds()).padStart(2, "0");
-        setSyncStatusUi(`시트 자동저장됨 (${t})`, true);
+        setSyncStatusUi(`시트 자동저장됨 (${t})${viaLabel}`, true);
       };
 
-      // Primary: Atomic 1-row PATCH_ROW via CORS GET (returns verified {status:"OK", version:2, patchedRow})
+      // 1. Primary: Atomic 1-row PATCH_ROW via CORS GET with cache: "no-store"
       try {
         const patchUrl = `${webhookUrl}${sep}action=PATCH_ROW&id=${spot.id}&values=${encodeURIComponent(JSON.stringify(rowValues))}&_ts=${Date.now()}`;
-        const res = await fetch(patchUrl, { method: "GET", redirect: "follow" });
+        const res = await fetch(patchUrl, { method: "GET", redirect: "follow", cache: "no-store" });
         if (res.ok) {
           const json = await res.json();
           if (json && json.status === "OK" && json.action === "PATCH_ROW") {
-            markSaved();
+            markSaved("");
+            return;
+          }
+          if (json && json.version !== 2) {
+            setSyncStatusUi("⚠️ Apps Script 새 버전 배포 필요", false);
+            showToast("⚠️ 시트의 Apps Script를 v2 코드로 [배포 관리 > 새 버전 배포] 해야 2·3차 챌린지가 안전하게 저장됩니다.");
             return;
           }
         }
       } catch (e) {}
 
-      // Fallback (for Apps Script v1 before user redeploys v2): Full q2_v813_values POST (NEVER sends broken certs string!)
-      const fullPayload = {
-        action: "SYNC_BAC_MASTER_SHEET",
-        spreadsheetId: GOOGLE_SHEET_ID,
-        sheetName: GOOGLE_SHEET_NAME,
-        certifiedInstanceCount: STATE.completedMap.size,
-        q2_v813_values: buildFullQ2V813Values()
-      };
+      // 2. CORS-Proof Fallback: Atomic 1-row PATCH_ROW via JSONP <script>
+      let jsonpDone = false;
+      try {
+        await new Promise((resolve) => {
+          const cbName = `__bacPatchCb_${Date.now()}`;
+          window[cbName] = function(resp) {
+            jsonpDone = true;
+            try { delete window[cbName]; } catch (e) {}
+            if (resp && resp.status === "OK" && resp.action === "PATCH_ROW") {
+              markSaved("");
+            } else if (resp && resp.version !== 2) {
+              setSyncStatusUi("⚠️ Apps Script 새 버전 배포 필요", false);
+              showToast("⚠️ Apps Script를 v2 코드로 새 버전 배포해 주세요.");
+            }
+            resolve();
+          };
+          const old = document.querySelector("[data-u-patch-jsonp]");
+          if (old) old.remove();
+          const sc = document.createElement("script");
+          sc.setAttribute("data-u-patch-jsonp", "1");
+          sc.src = `${webhookUrl}${sep}action=PATCH_ROW&id=${spot.id}&values=${encodeURIComponent(JSON.stringify(rowValues))}&callback=${cbName}&_ts=${Date.now()}`;
+          sc.onerror = () => resolve();
+          document.body.appendChild(sc);
+          setTimeout(resolve, 4000);
+        });
+        if (jsonpDone) return;
+      } catch (e) {}
+
+      // 3. Final fallback: POST PATCH_ROW only (NEVER overwrites other 811 rows!)
       try {
         await fetch(webhookUrl, {
           method: "POST",
           mode: "no-cors",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify(fullPayload)
+          body: JSON.stringify({ action: "PATCH_ROW", id: spot.id, values: rowValues })
         });
-      } catch (e) {
-        try {
-          const form = document.getElementById("bacHiddenSyncForm");
-          const inp = document.getElementById("bacHiddenSyncPayloadInput");
-          if (form && inp) {
-            form.action = webhookUrl;
-            inp.value = JSON.stringify(fullPayload);
-            form.submit();
-          }
-        } catch (fErr) {}
-      }
-      markSaved();
+        markSaved("");
+      } catch (e) {}
     }
 
     function parseSheetResponseIntoMap(resp) {
@@ -1099,15 +1115,21 @@
         STATE.completedMap = parsed.nextMap;
         saveLocalOnly();
         renderAll(false);
-        setSyncStatusUi(`시트 실시간 연동 (${parsed.cnt}건)`, true);
-        if (!silent) showToast(`구글 시트 최신 내역 ${parsed.cnt}건을 불러왔습니다.`);
+        if (parsed.isV2) {
+          setSyncStatusUi(`시트 실시간 연동 (${parsed.cnt}건)`, true);
+          if (!silent) showToast(`구글 시트 최신 내역 ${parsed.cnt}건을 불러왔습니다.`);
+        } else {
+          setSyncStatusUi(`⚠️ Apps Script v2 재배포 필요 (${parsed.cnt}건)`, false);
+          showToast("⚠️ 구버전 Apps Script가 실행 중입니다. 시트에서 v2 코드를 [배포 관리 > 새 버전]으로 배포해 주세요.");
+        }
       };
 
       const sep = webhookUrl.includes("?") ? "&" : "?";
       try {
         const res = await fetch(`${webhookUrl}${sep}action=READ_BAC_MASTER_SHEET&_ts=${Date.now()}`, {
           method: "GET",
-          redirect: "follow"
+          redirect: "follow",
+          cache: "no-store"
         });
         if (res.ok) {
           const json = await res.json();
